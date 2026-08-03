@@ -18,6 +18,7 @@ struct FloorMapView: View {
     var showAreas: Bool = true                                        // 영역 표시 게이트
     var onAreaChange: ((Zone?) -> Void)? = nil  // 진입(area)·이탈(nil)
     var mapRotation: Double = 270                                     // 도면 회전(도). 90/270이면 세로 화면을 꽉 채움
+    var heading: Double? = nil                                        // 나침반 헤딩(0=북) — 방향 부채꼴
 
     // 줌/팬 상태 (핀치 확대 + 드래그 이동, 더블탭 리셋)
     @State private var zoom: CGFloat = 1
@@ -64,9 +65,9 @@ struct FloorMapView: View {
                             .transition(.opacity)
                         }
 
-                        // 내 위치 (빨간 펄스 점)
+                        // 내 위치 (빨간 펄스 점 + 방향 부채꼴)
                         if let p = provider.latestPosition {
-                            PositionDot()
+                            PositionDot(heading: heading)
                                 .position(t.point(x: p.x, y: p.y))
                                 .animation(.easeInOut(duration: 0.5), value: p.x)
                                 .animation(.easeInOut(duration: 0.5), value: p.y)
@@ -184,9 +185,17 @@ private struct ZonePolygon: View {
 
 @available(iOS 27.0, *)
 private struct PositionDot: View {
+    var heading: Double? = nil        // 콘텐츠 공간은 북=위(+y) — 헤딩 그대로 회전
     @State private var pulse = false
     var body: some View {
         ZStack {
+            if let h = heading {
+                DirectionCone()
+                    .fill(Color.red.opacity(0.30))
+                    .frame(width: 46, height: 46)
+                    .rotationEffect(.degrees(h))
+                    .animation(.easeInOut(duration: 0.3), value: h)
+            }
             Circle()
                 .fill(Color.red.opacity(0.25))
                 .frame(width: pulse ? 46 : 22, height: pulse ? 46 : 22)
@@ -201,5 +210,19 @@ private struct PositionDot: View {
                 pulse = true
             }
         }
+    }
+}
+
+/// 위(북)를 가리키는 60° 부채꼴 — rotationEffect 로 헤딩만큼 돌려 쓴다
+@available(iOS 27.0, *)
+private struct DirectionCone: Shape {
+    func path(in rect: CGRect) -> Path {
+        var p = Path()
+        let c = CGPoint(x: rect.midX, y: rect.midY)
+        p.move(to: c)
+        p.addArc(center: c, radius: rect.width / 2 - 1,
+                 startAngle: .degrees(-120), endAngle: .degrees(-60), clockwise: false)
+        p.closeSubpath()
+        return p
     }
 }

@@ -29,6 +29,8 @@ struct GoogleFloorMapView: UIViewRepresentable {
     /// 보기 방향(도) — 표시용 카메라 회전. 측위 좌표와 무관.
     var mapRotation: Double = 270
     var showAreas: Bool = true
+    /// 나침반 헤딩(0=북) — 있으면 점 대신 방향 부채꼴을 그린다
+    var heading: Double? = nil
     var onAreaChange: ((Zone?) -> Void)? = nil
 
     // MARK: - UIViewRepresentable
@@ -81,7 +83,7 @@ struct GoogleFloorMapView: UIViewRepresentable {
         context.coordinator.showAreas = showAreas
         context.coordinator.onAreaChange = onAreaChange
         context.coordinator.sync(infra: infra, rotation: mapRotation)   // 층 전환·존 늦게 도착 반영
-        context.coordinator.update(position: provider.latestPosition)
+        context.coordinator.update(position: provider.latestPosition, heading: heading)
     }
 
     func makeCoordinator() -> Coordinator {
@@ -284,14 +286,34 @@ struct GoogleFloorMapView: UIViewRepresentable {
             }
         }()
 
+        /// 방향 아이콘 — 위(북)를 가리키는 부채꼴 + 빨간 점. marker.rotation 으로 헤딩만큼 돌린다.
+        private static let headingIcon: UIImage = {
+            let side: CGFloat = 46, c = side / 2
+            return UIGraphicsImageRenderer(size: CGSize(width: side, height: side)).image { ctx in
+                let g = ctx.cgContext
+                // 부채꼴 (위쪽 60°)
+                g.setFillColor(UIColor.systemRed.withAlphaComponent(0.30).cgColor)
+                g.move(to: CGPoint(x: c, y: c))
+                g.addArc(center: CGPoint(x: c, y: c), radius: c - 1,
+                         startAngle: -.pi/2 - .pi/6, endAngle: -.pi/2 + .pi/6, clockwise: false)
+                g.closePath(); g.fillPath()
+                // 중심 점
+                g.setFillColor(UIColor.white.cgColor)
+                g.fillEllipse(in: CGRect(x: c - 9, y: c - 9, width: 18, height: 18))
+                g.setFillColor(UIColor.systemRed.cgColor)
+                g.fillEllipse(in: CGRect(x: c - 6, y: c - 6, width: 12, height: 12))
+            }
+        }()
+        private var coneShown = false
+
         /// 진입 여부에 따른 색 — 기본 파랑, 진입 시 빨강 (FloorMapView 와 동일 규칙)
         private func apply(style polygon: GMSPolygon, entered: Bool) {
             polygon.strokeColor = entered ? .systemRed : .systemBlue
             polygon.fillColor = (entered ? UIColor.systemRed : UIColor.systemBlue).withAlphaComponent(0.22)
         }
 
-        /// 좌표 갱신 — 마커 이동 + 영역 진입/이탈 판정
-        func update(position: Coordinates?) {
+        /// 좌표 갱신 — 마커 이동·방향 회전 + 영역 진입/이탈 판정
+        func update(position: Coordinates?, heading: Double? = nil) {
             guard let mapView else { return }
             // 층 전환 직후의 재fit — updateUIView 도 레이아웃 사이클 중에 불릴 수 있어
             // layoutDidChange 와 같은 이유로 다음 런루프로 미룬다 (didFit 가드라 중복 호출 무해)
@@ -310,10 +332,17 @@ struct GoogleFloorMapView: UIViewRepresentable {
                 CATransaction.begin()
                 CATransaction.setAnimationDuration(0.5)
                 marker.position = coord
+                if let h = heading {
+                    if !coneShown { marker.icon = Self.headingIcon; coneShown = true }
+                    marker.rotation = h            // 도면이 북쪽 정렬(+y=북)이라 헤딩 그대로
+                }
                 CATransaction.commit()
             } else {
                 let marker = GMSMarker(position: coord)
-                marker.icon = Self.redDotIcon
+                marker.icon = heading == nil ? Self.redDotIcon : Self.headingIcon
+                coneShown = heading != nil
+                if let h = heading { marker.rotation = h }
+                marker.isFlat = true               // 지도 평면에 붙여 회전 — 카메라 회전과 정합
                 marker.groundAnchor = CGPoint(x: 0.5, y: 0.5)
                 marker.zIndex = 3
                 marker.isTappable = false
