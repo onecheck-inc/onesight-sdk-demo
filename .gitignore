@@ -1,0 +1,23 @@
+# ── OneS1ght SDK 데모 repo — 앱 소스만 공개 추적 ──
+# SDK(OneS1ghtSDK)는 별도 저장소(비공개)에서 배포 — 접근 권한은 담당자가 부여
+# 키(secrets.sqlite)·적용가이드(APPLY_GUIDE)는 저장소에 없음 → 담당자가 별도 전달
+
+# 기본: 전부 무시
+/*
+
+# 추적할 것만 예외
+!.gitignore
+!README.md
+!oneS1ghtSdk/
+!oneS1ghtSdk.xcodeproj/
+
+# 예외 안에서도 키·산출물은 차단 (이중 안전장치)
+Secrets.swift
+Secrets.swift.example
+secrets.sqlite
+.build/
+.swiftpm/
+**/Package.resolved
+**/xcuserdata/
+**/*.xcuserstate
+.DS_Store
