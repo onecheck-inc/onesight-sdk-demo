@@ -30,18 +30,17 @@ struct ContentView: View {
 struct VerifyView: View {
     @StateObject private var provider = UwbPositioningProvider()   // 패키지 내장 UWB 어댑터
     @StateObject private var permission = PermissionHelper()
-    @StateObject private var geospace = Geospace3Client()          // GeoSpace 도면·앵커·존 로드
     @State private var showLogSheet = false                        // 하단 상태바 탭 → 전체 로그
-    @State private var infra: Geospace3Client.FloorInfra?          // 받아온 도면 인프라
+    @State private var infra: FloorInfra?          // 받아온 도면 인프라
     /// 연결(초기화) 상태 — 문자열 파싱 대신 실제 상태로 판정
     private enum ConnState { case connecting, ready, failed }
     @State private var connState: ConnState = .connecting
     @State private var floorLoading = false   // 도면(GeoSpace) 로딩 중 — 층 전환 포함
 
     // 빌딩/층 선택
-    @State private var buildings: [Geospace3Client.Building] = []
-    @State private var selectedBuilding: Geospace3Client.Building?
-    @State private var selectedFloor: Geospace3Client.Floor?
+    @State private var buildings: [SpaceBuilding] = []
+    @State private var selectedBuilding: SpaceBuilding?
+    @State private var selectedFloor: SpaceFloor?
 
     /// 트래킹 시작 가능 여부 — 기기 지원 + 도면 로드됨 + 앵커 클러스터 배치완료(auto_done).
     /// (배치돼도 전원 이슈 등으로 신호가 없을 수 있어, 시작 후 watchdog가 최종 확인)
@@ -186,7 +185,7 @@ struct VerifyView: View {
 
     /// 층 표시 이름 치환 — GeoSpace에 층 이름 수정 API/UI가 없어(07-27 확인) 앱에서 표시만 교체.
     /// 서버 원본 이름("304로")은 그대로 두고 화면에만 적용. 서버에서 수정 가능해지면 제거.
-    private func floorDisplayName(_ f: Geospace3Client.Floor) -> String {
+    private func floorDisplayName(_ f: SpaceFloor) -> String {
         switch f.id {
         case "7aeb5ded-8dd2-4ed7-951f-4d18317910ce":
             return Localized.text("floor.jpMeetingRoom")   // 서버명: "304로"
@@ -294,7 +293,9 @@ struct VerifyView: View {
         connState = .connecting
         Task {
             do {
-                try await OneS1ghtSDK.shared.initialize(apiKey: ConfigDB.sdkKey)
+                try await OneS1ghtSDK.shared.initialize(
+                    apiKey: ConfigDB.sdkKey,
+                    geospaceKey: ConfigDB.geospaceKey.isEmpty ? nil : ConfigDB.geospaceKey)
                 connState = .ready
             } catch {
                 connState = .failed
@@ -307,7 +308,7 @@ struct VerifyView: View {
     private func loadBuildingList() {
         Task {
             do {
-                let list = try await geospace.loadBuildings()
+                let list = try await OneS1ghtSDK.shared.buildings()
                 buildings = list
                 provider.note(Localized.format("log.buildingsLoaded", list.count))
                 // 기본 선택: 금정역 skv1 — 구글맵 원점 좌표가 있는 유일한 층이라 지도 검증이 여기서만 된다
@@ -321,13 +322,13 @@ struct VerifyView: View {
     }
 
     /// 빌딩 선택 → 그 빌딩의 첫 층 자동 선택 후 로딩.
-    private func selectBuilding(_ b: Geospace3Client.Building) {
+    private func selectBuilding(_ b: SpaceBuilding) {
         selectedBuilding = b
         if let f = b.floors.first { selectFloor(f) } else { selectedFloor = nil; infra = nil }
     }
 
     /// 층 선택 → 그 building/floor 의 도면·앵커·존 로딩.
-    private func selectFloor(_ f: Geospace3Client.Floor) {
+    private func selectFloor(_ f: SpaceFloor) {
         selectedFloor = f
         guard let b = selectedBuilding else { return }
         // 층 변경 → 측위 즉시 중단. provider.stop()을 동기로 먼저 호출해 isRunning을 바로 꺼서
@@ -344,18 +345,20 @@ struct VerifyView: View {
         Task {
             defer { floorLoading = false }
             do {
-                let loaded = try await geospace.loadInfra(buildingId: b.id, floorId: f.id)
+                // SDK 가 도면을 돌려주고 앵커·세션·존은 내부 엔진에 직접 주입한다.
+                // 데모 provider 는 UI 관찰용으로 직접 보유 중이라 config 만 수동 반영.
+                let loaded = try await OneS1ghtSDK.shared.loadFloor(buildingId: b.id, floorId: f.id)
                 infra = loaded
-                // GeoSpace에서 받은 측위 설정(앵커·세션)을 SDK에 주입 — "콘센트" 통로.
-                // (나중에 console 프록시로 바뀌면 이 dict 소스만 교체, apply(config:)는 그대로)
                 let anchorDict = Dictionary(uniqueKeysWithValues:
                     loaded.anchors.map { ($0.address, SIMD3<Double>($0.x, $0.y, $0.z)) })
-                provider.apply(config: PositioningConfig(anchors: anchorDict, sessionId: loaded.sessionId))
-                provider.apply(buildingId: b.id, floorId: f.id)   // SDK 로그·이벤트 경로도 선택값으로
+                provider.apply(config: PositioningConfig(anchors: anchorDict,
+                                                         sessionId: loaded.sessionId,
+                                                         zones: loaded.zones))
+                provider.apply(buildingId: b.id, floorId: f.id)
                 provider.note(Localized.format("log.floorLoaded", b.name, floorDisplayName(f),
                                      loaded.anchors.count, loaded.sessionId.map(String.init) ?? "-",
-                                     loaded.customAreas.count))
-                if loaded.customAreas.isEmpty { startZoneWatch(buildingId: b.id, floorId: f.id) }
+                                     loaded.zones.count))
+                if loaded.zones.isEmpty { startZoneWatch(buildingId: b.id, floorId: f.id) }
             } catch {
                 provider.note(Localized.format("log.floorFail", "\(error)"))
             }
@@ -369,9 +372,9 @@ struct VerifyView: View {
         zoneWatchTask?.cancel(); zoneWatchTask = nil
         zonesRefreshing = true
         Task { @MainActor in
-            let zones = await geospace.loadZones(buildingId: infra.buildingId, floorId: infra.floorId)
+            let zones = await OneS1ghtSDK.shared.refreshZones()
             try? await Task.sleep(nanoseconds: 700_000_000)   // 조회가 0.1초라 최소 스핀 시간 확보
-            withAnimation { self.infra?.customAreas = zones }
+            withAnimation { self.infra?.zones = zones }
             zonesRefreshing = false
             if zones.isEmpty {
                 startZoneWatch(buildingId: infra.buildingId, floorId: infra.floorId)
@@ -386,9 +389,9 @@ struct VerifyView: View {
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 1_000_000_000)   // 1초
                 guard !Task.isCancelled, infra?.floorId == floorId else { return }
-                let zones = await geospace.loadZones(buildingId: buildingId, floorId: floorId)
+                let zones = await OneS1ghtSDK.shared.refreshZones()
                 if !zones.isEmpty {
-                    withAnimation { infra?.customAreas = zones }    // 생기면 그냥 바로 보여줌
+                    withAnimation { infra?.zones = zones }    // 생기면 그냥 바로 보여줌
                     zoneWatchTask = nil
                     return                                          // 하나라도 있으면 종료
                 }
@@ -398,7 +401,7 @@ struct VerifyView: View {
 
     /// 영역 진입/이탈 — 진입하면 서버 다운링크 큐를 1초마다 폴링, 이탈하면 중지.
     /// 큐에 이벤트가 있으면(서버가 push) payload에 맞춰 인앱 메시지를 띄운다.
-    private func handleAreaChange(_ area: Geospace3Client.CustomArea?) {
+    private func handleAreaChange(_ area: Zone?) {
         pollTask?.cancel(); pollTask = nil
         guard let area, let infra else {                       // 이탈
             if enteredArea != nil { showToast(Localized.text("log.areaExit")) }

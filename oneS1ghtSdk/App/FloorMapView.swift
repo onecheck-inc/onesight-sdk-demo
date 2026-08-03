@@ -2,10 +2,10 @@
 //  FloorMapView.swift
 //  oneS1ghtSdk
 //
-//  GeoSpace 도면 이미지 위에 "내 위치"(빨간 점) + GeoSpace custom_area(지정 영역)를 그리는 지도.
-//  · 좌표계 = GeoSpace 미터 (경계 minX..maxX / minY..maxY, Y-up).
-//  · custom_area = infra.customAreas (workspaces 폴리곤, 미터 좌표 → 도면과 정합).
-//  · 내 위치가 영역 안에 들어가면 하이라이트 + onAreaEnter 발화.
+//  도면 이미지 위에 "내 위치"(빨간 점) + 존 폴리곤을 그리는 캔버스 지도.
+//  구글맵 뷰(GoogleFloorMapView)의 폴백 — 원점 위경도가 없는 층에서 사용.
+//  · 좌표계 = 도면 로컬 미터 (SDK FloorInfra — 경계 plan.minX..maxX, Y-up).
+//  · 내 위치가 존 안에 들어가면 하이라이트 + onAreaChange 발화.
 //
 
 import SwiftUI
@@ -14,9 +14,9 @@ import OneS1ghtSDK
 @available(iOS 27.0, *)
 struct FloorMapView: View {
     @ObservedObject var provider: UwbPositioningProvider
-    var infra: Geospace3Client.FloorInfra?
+    var infra: FloorInfra?
     var showAreas: Bool = true                                        // 영역 표시 게이트
-    var onAreaChange: ((Geospace3Client.CustomArea?) -> Void)? = nil  // 진입(area)·이탈(nil)
+    var onAreaChange: ((Zone?) -> Void)? = nil  // 진입(area)·이탈(nil)
     var mapRotation: Double = 270                                     // 도면 회전(도). 90/270이면 세로 화면을 꽉 채움
 
     // 줌/팬 상태 (핀치 확대 + 드래그 이동, 더블탭 리셋)
@@ -27,10 +27,10 @@ struct FloorMapView: View {
 
     private var rotated90: Bool { mapRotation == 90 || mapRotation == 270 }
 
-    /// 현재 내 위치가 들어가 있는 custom area (없으면 nil)
-    private var currentArea: Geospace3Client.CustomArea? {
-        guard let p = provider.latestPosition, let areas = infra?.customAreas else { return nil }
-        return areas.first { Self.pointInPolygon(x: p.x, y: p.y, polygon: $0.points) }
+    /// 현재 내 위치가 들어가 있는 존 (없으면 nil) — 판정은 SDK Zone.contains 재사용
+    private var currentArea: Zone? {
+        guard let p = provider.latestPosition, let zones = infra?.zones else { return nil }
+        return zones.first { $0.contains(Position(x: p.x, y: p.y)) }
     }
 
     var body: some View {
@@ -44,16 +44,16 @@ struct FloorMapView: View {
 
                     ZStack {
                         // 배경 도면 이미지
-                        Image(uiImage: infra.image)
+                        Image(uiImage: UIImage(data: infra.plan.pngData) ?? UIImage())
                             .resizable()
                             .frame(width: r.width, height: r.height)
                             .position(x: r.midX, y: r.midY)
 
                         // GeoSpace custom_area (지정 영역) — 데모: showAreas일 때 페이드인
                         if showAreas {
-                            ForEach(Array(infra.customAreas.enumerated()), id: \.offset) { _, area in
+                            ForEach(Array(infra.zones.enumerated()), id: \.offset) { _, area in
                                 ZonePolygon(
-                                    points: area.points.map { t.point(x: Double($0.x), y: Double($0.y)) },
+                                    points: area.polygon.map { t.point(x: $0.x, y: $0.y) },
                                     name: area.name,
                                     color: area.id == currentArea?.id ? .red : .blue,   // 기본 파랑 · 진입 시 빨강
                                     active: area.id == currentArea?.id,
@@ -109,22 +109,6 @@ struct FloorMapView: View {
         }
     }
 
-    /// ray casting — 점이 폴리곤 내부인가 (미터 좌표)
-    private static func pointInPolygon(x: Double, y: Double, polygon: [CGPoint]) -> Bool {
-        guard polygon.count >= 3 else { return false }
-        var inside = false
-        var j = polygon.count - 1
-        for i in 0..<polygon.count {
-            let a = polygon[i], b = polygon[j]
-            if (Double(a.y) > y) != (Double(b.y) > y) {
-                let xCross = Double(a.x) + (y - Double(a.y)) / (Double(b.y) - Double(a.y)) * (Double(b.x) - Double(a.x))
-                if x < xCross { inside.toggle() }
-            }
-            j = i
-        }
-        return inside
-    }
-
     // MARK: - GeoSpace 미터 → 화면 픽셀 (경계 기준 fit + Y 뒤집기)
 
     private struct Transform {
@@ -133,10 +117,10 @@ struct FloorMapView: View {
         let origin: CGPoint
 
         /// contain: 도면 전체가 다 보이게 fit(안 잘림). 여백은 바깥 padding으로 조금 준다.
-        init(infra: Geospace3Client.FloorInfra, canvas: CGSize) {
-            minX = infra.minX; minY = infra.minY; maxY = infra.maxY
-            let w = infra.maxX - infra.minX
-            let h = infra.maxY - infra.minY
+        init(infra: FloorInfra, canvas: CGSize) {
+            minX = infra.plan.minX; minY = infra.plan.minY; maxY = infra.plan.maxY
+            let w = infra.plan.widthM
+            let h = infra.plan.heightM
             let s = min(canvas.width / w, canvas.height / h)
             scale = s
             origin = CGPoint(x: (canvas.width - w * s) / 2,
@@ -148,10 +132,10 @@ struct FloorMapView: View {
                     y: origin.y + CGFloat(maxY - y) * scale)
         }
 
-        func imageRect(_ infra: Geospace3Client.FloorInfra) -> CGRect {
-            let bl = point(x: Double(infra.originMeters.x), y: Double(infra.originMeters.y))
-            let wpx = CGFloat(infra.sizeMeters.width) * scale
-            let hpx = CGFloat(infra.sizeMeters.height) * scale
+        func imageRect(_ infra: FloorInfra) -> CGRect {
+            let bl = point(x: infra.plan.originX, y: infra.plan.originY)
+            let wpx = CGFloat(infra.plan.widthM) * scale
+            let hpx = CGFloat(infra.plan.heightM) * scale
             return CGRect(x: bl.x, y: bl.y - hpx, width: wpx, height: hpx)
         }
     }

@@ -14,36 +14,22 @@ import CoreLocation
 import GoogleMaps
 import OneS1ghtSDK
 
-extension Geospace3Client.CustomArea {
-    /// 이 영역 안에 로컬 좌표가 들어오는가 (ray casting)
-    func contains(x: Double, y: Double) -> Bool {
-        guard points.count >= 3 else { return false }
-        var inside = false
-        var j = points.count - 1
-        for i in 0..<points.count {
-            let a = points[i], b = points[j]
-            if (Double(a.y) > y) != (Double(b.y) > y) {
-                let slope = (y - Double(a.y)) / (Double(b.y) - Double(a.y))
-                let xCross = Double(a.x) + slope * (Double(b.x) - Double(a.x))
-                if x < xCross { inside.toggle() }
-            }
-            j = i
-        }
-        return inside
-    }
+extension Zone {
+    /// 이 영역 안에 로컬 좌표가 들어오는가 — SDK ray casting 재사용
+    func contains(x: Double, y: Double) -> Bool { contains(Position(x: x, y: y)) }
 }
 
 @available(iOS 27.0, *)
 struct GoogleFloorMapView: UIViewRepresentable {
 
     @ObservedObject var provider: UwbPositioningProvider
-    var infra: Geospace3Client.FloorInfra
+    var infra: FloorInfra
     /// 도면 원점의 실세계 좌표 (GeoSpace 정렬값 또는 폴백)
     var origin: CLLocationCoordinate2D
     /// 보기 방향(도) — 표시용 카메라 회전. 측위 좌표와 무관.
     var mapRotation: Double = 270
     var showAreas: Bool = true
-    var onAreaChange: ((Geospace3Client.CustomArea?) -> Void)? = nil
+    var onAreaChange: ((Zone?) -> Void)? = nil
 
     // MARK: - UIViewRepresentable
 
@@ -105,9 +91,9 @@ struct GoogleFloorMapView: UIViewRepresentable {
     // MARK: - Coordinator (오버레이 수명 관리)
 
     final class Coordinator {
-        private var infra: Geospace3Client.FloorInfra
+        private var infra: FloorInfra
         var showAreas: Bool
-        var onAreaChange: ((Geospace3Client.CustomArea?) -> Void)?
+        var onAreaChange: ((Zone?) -> Void)?
 
         /// 로컬 미터를 이 배수로 뻥튀기해서 지도에 얹는다 (AIShopping 과 동일).
         /// 구글맵 줌 상한(21)으론 13m 방을 화면에 못 채우는데, 공간을 3배로 키우면
@@ -144,9 +130,9 @@ struct GoogleFloorMapView: UIViewRepresentable {
             DispatchQueue.main.async { [weak self] in self?.fitIfNeeded() }
         }
 
-        init(infra: Geospace3Client.FloorInfra,
+        init(infra: FloorInfra,
              showAreas: Bool,
-             onAreaChange: ((Geospace3Client.CustomArea?) -> Void)?) {
+             onAreaChange: ((Zone?) -> Void)?) {
             self.infra = infra
             self.showAreas = showAreas
             self.onAreaChange = onAreaChange
@@ -155,7 +141,7 @@ struct GoogleFloorMapView: UIViewRepresentable {
         /// 층 전환·존 갱신 반영 — 쇼핑앱의 clear() + 재로드에 해당.
         /// · 층이 바뀌면: 오버레이 전부 걷어내고 새 도면으로 다시 설치 (fit도 다시)
         /// · 같은 층에서 존만 바뀌면(폴링으로 늦게 도착·새로고침): 폴리곤만 다시 그림
-        func sync(infra newInfra: Geospace3Client.FloorInfra, rotation: Double) {
+        func sync(infra newInfra: FloorInfra, rotation: Double) {
             guard let mapView else { infra = newInfra; return }
 
             if newInfra.floorId != infra.floorId {
@@ -170,32 +156,32 @@ struct GoogleFloorMapView: UIViewRepresentable {
             }
 
             infra = newInfra   // 존 판정이 항상 최신 목록을 보게
-            let newIds = Set(newInfra.customAreas.map(\.id))
+            let newIds = Set(newInfra.zones.map(\.id))
             if newIds != Set(areaPolygons.keys) {
                 areaPolygons.values.forEach { $0.map = nil }
                 areaPolygons.removeAll()
-                addAreas(newInfra.customAreas, to: mapView)
+                addAreas(newInfra.zones, to: mapView)
             }
         }
 
         /// 도면·영역·카메라 최초 배치 (한 번만)
-        func install(on mapView: GMSMapView, infra: Geospace3Client.FloorInfra, rotation: Double) {
+        func install(on mapView: GMSMapView, infra: FloorInfra, rotation: Double) {
             self.mapView = mapView
 
             mapView.setMinZoom(15, maxZoom: 21)   // 흰 허공까지 멀리 나가지 않게 (AIShopping 과 동일 범위)
 
-            guard let sw = world(x: infra.minX, y: infra.minY),
-                  let ne = world(x: infra.maxX, y: infra.maxY) else { return }
+            guard let sw = world(x: infra.plan.minX, y: infra.plan.minY),
+                  let ne = world(x: infra.plan.maxX, y: infra.plan.maxY) else { return }
 
             // 도면 — 남서/북동 두 점이 만드는 사각형에 이미지를 얹는다
             let bounds = GMSCoordinateBounds(coordinate: sw, coordinate: ne)
-            let overlay = GMSGroundOverlay(bounds: bounds, icon: infra.image)
+            let overlay = GMSGroundOverlay(bounds: bounds, icon: UIImage(data: infra.plan.pngData) ?? UIImage())
             overlay.bearing = 0            // 오버레이는 안 돌린다 — 회전은 카메라 몫
             overlay.zIndex = 1
             overlay.map = mapView
             planOverlay = overlay
 
-            addAreas(infra.customAreas, to: mapView)
+            addAreas(infra.zones, to: mapView)
 
             planBounds = bounds
             self.rotation = rotation
@@ -223,13 +209,13 @@ struct GoogleFloorMapView: UIViewRepresentable {
             // 앵커가 없으면 도면 경계로 폴백.
             let minX: Double, minY: Double, maxX: Double, maxY: Double
             if !infra.anchors.isEmpty {
-                minX = Swift.max(infra.anchors.map(\.x).min()! - 1, infra.minX)
-                minY = Swift.max(infra.anchors.map(\.y).min()! - 1, infra.minY)
-                maxX = Swift.min(infra.anchors.map(\.x).max()! + 1, infra.maxX)
-                maxY = Swift.min(infra.anchors.map(\.y).max()! + 1, infra.maxY)
+                minX = Swift.max(infra.anchors.map(\.x).min()! - 1, infra.plan.minX)
+                minY = Swift.max(infra.anchors.map(\.y).min()! - 1, infra.plan.minY)
+                maxX = Swift.min(infra.anchors.map(\.x).max()! + 1, infra.plan.maxX)
+                maxY = Swift.min(infra.anchors.map(\.y).max()! + 1, infra.plan.maxY)
             } else {
-                minX = infra.minX; minY = infra.minY
-                maxX = infra.maxX; maxY = infra.maxY
+                minX = infra.plan.minX; minY = infra.plan.minY
+                maxX = infra.plan.maxX; maxY = infra.plan.maxY
             }
             let cx = (minX + maxX) / 2
             let cy = (minY + maxY) / 2
@@ -265,12 +251,12 @@ struct GoogleFloorMapView: UIViewRepresentable {
             mapView.cameraTargetBounds = bounds   // 도면 밖으로 팬해서 길 잃지 않게
         }
 
-        private func addAreas(_ areas: [Geospace3Client.CustomArea], to mapView: GMSMapView) {
+        private func addAreas(_ areas: [Zone], to mapView: GMSMapView) {
             for area in areas {
                 let path = GMSMutablePath()
                 var ok = true
-                for p in area.points {
-                    guard let c = world(x: Double(p.x), y: Double(p.y)) else {
+                for p in area.polygon {
+                    guard let c = world(x: p.x, y: p.y) else {
                         ok = false; break
                     }
                     path.add(c)
@@ -335,7 +321,7 @@ struct GoogleFloorMapView: UIViewRepresentable {
                 meMarker = marker
             }
 
-            let entered = infra.customAreas.first { $0.contains(x: p.x, y: p.y) }
+            let entered = infra.zones.first { $0.contains(x: p.x, y: p.y) }
             if entered?.id != currentAreaId {
                 currentAreaId = entered?.id
                 onAreaChange?(entered)
