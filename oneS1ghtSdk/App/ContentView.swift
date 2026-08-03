@@ -89,14 +89,12 @@ struct VerifyView: View {
                                        origin: origin,
                                        mapRotation: mapRotation(for: selectedFloor?.id),
                                        showAreas: true,
-                                       heading: permission.heading,
                                        onAreaChange: { area in handleAreaChange(area) })
                 } else {
                     FloorMapView(provider: provider, infra: infra,
                                  showAreas: true,
                                  onAreaChange: { area in handleAreaChange(area) },
-                                 mapRotation: mapRotation(for: selectedFloor?.id),
-                                 heading: permission.heading)
+                                 mapRotation: mapRotation(for: selectedFloor?.id))
                 }
             }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -456,34 +454,9 @@ struct VerifyView: View {
                 try await OneS1ghtSDK.shared.start(consent: true,    // 검증 앱은 동의 전제
                                                    provider: provider)
                 startReceptionWatchdog()   // 앵커 수신 감시 → 안 잡히면 자동 종료
-                startHeadingAgreementCheck()   // 좌표계(+y=북) ↔ 나침반 정합 검증 로그
             } catch {
                 // start 실패는 연결(초기화) 오류와 별개 → 로그로만 (상태는 연결됨 유지)
                 provider.note("⚠️ 측위 시작 실패: \(error)")
-            }
-        }
-    }
-
-    /// 좌표계-나침반 정합 검증 — 걷는 동안 UWB 이동 벡터와 헤딩을 비교해 로그로.
-    /// GeoSpace 규약(+y=북, +x=동)이 현장 시공에서 실제로 지켜졌는지 확인하는 용도.
-    private func startHeadingAgreementCheck() {
-        Task { @MainActor in
-            var last: (x: Double, y: Double)? = nil
-            var lastNote = Date.distantPast
-            while provider.isRunning {
-                try? await Task.sleep(nanoseconds: 2_000_000_000)
-                guard let p = provider.latestPosition else { continue }
-                defer { last = (p.x, p.y) }
-                guard let l = last, let h = permission.heading else { continue }
-                let dx = p.x - l.x, dy = p.y - l.y
-                guard (dx*dx + dy*dy).squareRoot() >= 0.6,                    // 걷는 중일 때만
-                      Date().timeIntervalSince(lastNote) > 6 else { continue }
-                var bearing = atan2(dx, dy) * 180 / .pi                       // 0=북(+y), 시계방향
-                if bearing < 0 { bearing += 360 }
-                var diff = abs(bearing - h).truncatingRemainder(dividingBy: 360)
-                if diff > 180 { diff = 360 - diff }
-                provider.note(String(format: "🧭 이동 %.0f° · 헤딩 %.0f° · 차 %.0f°", bearing, h, diff))
-                lastNote = Date()
             }
         }
     }

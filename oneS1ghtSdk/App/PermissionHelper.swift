@@ -16,20 +16,12 @@ final class PermissionHelper: NSObject, ObservableObject {
 
     @Published var locationStatus: CLAuthorizationStatus = .notDetermined
 
-    /// 나침반 헤딩 (도, 0=북 시계방향). GeoSpace 좌표계가 +y=북이라 도면 방향과 직결.
-    /// trueHeading(진북) 우선, 미가용 시 magneticHeading (편각 ~8° 오차 감수).
-    @Published var heading: Double? = nil
-
     private let manager = CLLocationManager()
 
     override init() {
         super.init()
         manager.delegate = self
         locationStatus = manager.authorizationStatus
-        manager.headingFilter = 3                       // 3° 이상 변할 때만 통지 (떨림 억제)
-        if CLLocationManager.headingAvailable() {       // 시뮬레이터엔 나침반 없음
-            manager.startUpdatingHeading()
-        }
     }
 
     /// 위치 권한 시스템 팝업 요청 (미결정일 때만 팝업 뜸)
@@ -67,11 +59,5 @@ extension PermissionHelper: CLLocationManagerDelegate {
         Task { @MainActor in
             self.locationStatus = status
         }
-    }
-
-    nonisolated func locationManager(_ manager: CLLocationManager, didUpdateHeading newHeading: CLHeading) {
-        guard newHeading.headingAccuracy >= 0 else { return }   // 음수 = 무효(캘리브레이션 필요)
-        let h = newHeading.trueHeading >= 0 ? newHeading.trueHeading : newHeading.magneticHeading
-        Task { @MainActor in self.heading = h }
     }
 }
