@@ -117,7 +117,7 @@
 			mainGroup = F76C97383000F1C90030AC62;
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
-				A15DDECAFE0000000000A001 /* XCLocalSwiftPackageReference "Packages/OneS1ghtSDK" */,
+				A15DDECAFE0000000000A001 /* XCRemoteSwiftPackageReference "onesight-sdk" */,
 				F71C238D301C77F8006D6155 /* XCRemoteSwiftPackageReference "ios-maps-sdk" */,
 			);
 			preferredProjectObjectVersion = 77;
@@ -371,14 +371,15 @@
 		};
 /* End XCConfigurationList section */
 
-/* Begin XCLocalSwiftPackageReference section */
-		A15DDECAFE0000000000A001 /* XCLocalSwiftPackageReference "Packages/OneS1ghtSDK" */ = {
-			isa = XCLocalSwiftPackageReference;
-			relativePath = Packages/OneS1ghtSDK;
-		};
-/* End XCLocalSwiftPackageReference section */
-
 /* Begin XCRemoteSwiftPackageReference section */
+		A15DDECAFE0000000000A001 /* XCRemoteSwiftPackageReference "onesight-sdk" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/onecheck-inc/onesight-sdk";
+			requirement = {
+				branch = main;
+				kind = branch;
+			};
+		};
 		F71C238D301C77F8006D6155 /* XCRemoteSwiftPackageReference "ios-maps-sdk" */ = {
 			isa = XCRemoteSwiftPackageReference;
 			repositoryURL = "https://github.com/googlemaps/ios-maps-sdk";
@@ -392,6 +393,7 @@
 /* Begin XCSwiftPackageProductDependency section */
 		A15DDECAFE0000000000A002 /* OneS1ghtSDK */ = {
 			isa = XCSwiftPackageProductDependency;
+			package = A15DDECAFE0000000000A001 /* XCRemoteSwiftPackageReference "onesight-sdk" */;
 			productName = OneS1ghtSDK;
 		};
 		F71C238E301C77F8006D6155 /* GoogleMaps */ = {
