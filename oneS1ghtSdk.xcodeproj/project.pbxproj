@@ -372,13 +372,9 @@
 /* End XCConfigurationList section */
 
 /* Begin XCRemoteSwiftPackageReference section */
-		A15DDECAFE0000000000A001 /* XCRemoteSwiftPackageReference "onesight-sdk" */ = {
-			isa = XCRemoteSwiftPackageReference;
-			repositoryURL = "https://github.com/onecheck-inc/onesight-sdk";
-			requirement = {
-				branch = main;
-				kind = branch;
-			};
+		A15DDECAFE0000000000A001 /* XCLocalSwiftPackageReference "Packages/OneS1ghtSDK" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = Packages/OneS1ghtSDK;
 		};
 		F71C238D301C77F8006D6155 /* XCRemoteSwiftPackageReference "ios-maps-sdk" */ = {
 			isa = XCRemoteSwiftPackageReference;

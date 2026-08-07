@@ -4,8 +4,8 @@
 //
 //  검증 앱 = "고객사 앱 시늉". OneS1ghtSDK 패키지를 소비한다:
 //    · 측위 엔진(UwbPositioningProvider·패키지 내장)을 provider로 주입해 start
-//    · zone 이벤트 → toast / 이벤트2는 쿠폰 팝업 (로컬 훅)
-//    · 서버 triggers(개인화 액션) → onTriggers 콜백 (서버 /events/zone 수정 후 실물 확인)
+//    · zone 판정(PRM) → onZoneEvent 판정 배너 (로컬 훅)
+//    · PRM IN → 서버 /events/zone → onTriggers — 존에 연결된 시책이 쿠폰이면 팝업
 //
 
 import SwiftUI
@@ -56,11 +56,24 @@ struct VerifyView: View {
     @State private var pollTask: Task<Void, Never>?  // 존 진입 중 1초 큐 폴링
     @State private var zoneWatchTask: Task<Void, Never>?  // 존 0개일 때 1초 존 등록 감시
     @State private var zonesRefreshing = false            // 존 새로고침 중 (버튼 스피너)
-    @State private var couponReceived = false        // 쿠폰 1회 수령 → 이번 세션 폴링 종료
+    @State private var couponReceived = false        // 쿠폰 1회 수령 → 이번 세션 종료
 
     /// [데모] toast 배너 off — 메시지는 하단 상태바 로그로만 남긴다.
     private func showToast(_ text: String) {
         provider.note(text)
+    }
+
+    // 판정 팝업 — 엔진(PRM)이 IN/OUT/DWELL 을 발화하는 순간 화면 상단에 띄운다.
+    // 걷기 검증 중 로그를 볼 수 없어 "지금 판정됐다"를 눈으로 확인하는 용도.
+    @State private var judgeBanner: String?
+    @State private var judgeBannerTask: Task<Void, Never>?
+    private func showJudgeBanner(_ text: String) {
+        judgeBanner = text
+        judgeBannerTask?.cancel()
+        judgeBannerTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 3_000_000_000)
+            if !Task.isCancelled { judgeBanner = nil }
+        }
     }
 
     var body: some View {
@@ -158,6 +171,13 @@ struct VerifyView: View {
                 }
                 .navigationTitle("로그 (\(provider.log.count))")
                 .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .topBarTrailing) {
+                        ShareLink(item: JudgmentLog.fileURL) {   // 판정 증적 파일 내보내기
+                            Image(systemName: "square.and.arrow.up")
+                        }
+                    }
+                }
             }
             .presentationDetents([.medium, .large])
         }
@@ -165,16 +185,53 @@ struct VerifyView: View {
         .overlay {
             if showCoupon { couponPopup }
         }
+        // 판정 팝업 배너 (상단)
+        .overlay(alignment: .top) {
+            if let judgeBanner {
+                Text(judgeBanner)
+                    .font(.callout.monospaced().bold())
+                    .padding(.horizontal, 16).padding(.vertical, 10)
+                    .background(.black.opacity(0.85), in: Capsule())
+                    .foregroundStyle(.white)
+                    .padding(.top, 4)
+                    .transition(.move(edge: .top).combined(with: .opacity))
+            }
+        }
+        .animation(.snappy, value: judgeBanner)
         .onAppear {
-            // 서버 triggers(개인화 액션) — /events/zone 살아나면 여기로 실물이 옴
-            OneS1ghtSDK.shared.onTriggers = { zoneId, triggers in
+            // 서버 triggers(개인화 액션) — PRM IN 전송 → /events/zone 응답으로 도착.
+            // 존에 연결된 시책이 쿠폰이면 팝업, 그 외(사이니지 등)는 toast.
+            OneS1ghtSDK.onTriggers = { zoneId, triggers in
                 for t in triggers {
-                    showToast(Localized.format("log.serverAction", t.type))
+                    if t.type == "coupon", !couponReceived {
+                        couponTitle = t.payload?["title"] ?? "쿠폰"
+                        couponContent = t.payload?["rule"] ?? ""
+                        couponReceived = true                 // 세션당 1회
+                        showToast("🎁 \(couponTitle)")
+                        withAnimation { showCoupon = true }
+                    } else {
+                        showToast(Localized.format("log.serverAction", t.type))
+                    }
                 }
             }
             // SDK 내부 활동(verify·flush·zone 전송 결과)을 같은 로그창에 합류
-            OneS1ghtSDK.shared.onDebugLog = { line in
+            OneS1ghtSDK.onDebugLog = { line in
                 provider.note("🌐 \(line)")
+            }
+            // 판정 증적 — 화면 로그는 200줄 링버퍼 휘발이라, 전 라인을 파일에 영속
+            provider.onLog = { line in JudgmentLog.append(line) }
+            // 판정 팝업 — 엔진 이벤트를 시각과 함께 화면에 (걷기 검증용)
+            // ★ 쿠폰은 PRM 판정 기준: IN → 큐 폴링 시작 · OUT → 중지
+            provider.onZoneEvent = { ev in
+                let df = DateFormatter()
+                df.locale = Locale(identifier: "en_US_POSIX")
+                df.dateFormat = "HH:mm:ss"
+                showJudgeBanner("\(ev.label) · \(df.string(from: Date()))")
+                switch ev {
+                case .enter(let zone, _): startEventPolling(zoneId: zone.id)
+                case .exit:               pollTask?.cancel(); pollTask = nil
+                default:                  break
+                }
             }
             // ① 앱 시작 시 초기화 — 키 검증 + 설정 프리페치 ("세션 가능?" 미리 판정)
             initializeSDK()
@@ -275,7 +332,7 @@ struct VerifyView: View {
             pollTask?.cancel(); pollTask = nil   // 큐 폴링 중지
             enteredArea = nil
             provider.stop()                       // 즉시 isRunning=false → 상태 바로 전환
-            Task { await OneS1ghtSDK.shared.stop() }   // 코어 flush·타이머 정리
+            Task { await OneS1ghtSDK.stop() }   // 코어 flush·타이머 정리
             return
         }
         switch permission.locationStatus {
@@ -293,8 +350,8 @@ struct VerifyView: View {
         connState = .connecting
         Task {
             do {
-                try await OneS1ghtSDK.shared.initialize(
-                    apiKey: ConfigDB.sdkKey,
+                try await OneS1ghtSDK.initialize(
+                    sdkKey: ConfigDB.sdkKey,
                     geospaceKey: ConfigDB.geospaceKey.isEmpty ? nil : ConfigDB.geospaceKey)
                 connState = .ready
             } catch {
@@ -308,7 +365,7 @@ struct VerifyView: View {
     private func loadBuildingList() {
         Task {
             do {
-                let list = try await OneS1ghtSDK.shared.buildings()
+                let list = try await OneS1ghtSDK.buildings()
                 buildings = list
                 provider.note(Localized.format("log.buildingsLoaded", list.count))
                 // 기본 선택: 금정역 skv1 — 구글맵 원점 좌표가 있는 유일한 층이라 지도 검증이 여기서만 된다
@@ -335,7 +392,7 @@ struct VerifyView: View {
         // 상태가 "측위 중"에 안 걸리게 하고, 코어 정리·flush는 async로 뒤따른다.
         if provider.isRunning {
             provider.stop()                             // 즉시 isRunning=false + 빨간점 제거
-            Task { await OneS1ghtSDK.shared.stop() }     // 코어 flush·타이머 정리
+            Task { await OneS1ghtSDK.stop() }     // 코어 flush·타이머 정리
         }
         infra = nil                              // 로딩 표시(도면 로딩 중…)
         floorLoading = true                      // 상태바 "도면 불러오는 중"
@@ -347,7 +404,7 @@ struct VerifyView: View {
             do {
                 // SDK 가 도면을 돌려주고 앵커·세션·존은 내부 엔진에 직접 주입한다.
                 // 데모 provider 는 UI 관찰용으로 직접 보유 중이라 config 만 수동 반영.
-                let loaded = try await OneS1ghtSDK.shared.loadFloor(buildingId: b.id, floorId: f.id)
+                let loaded = try await OneS1ghtSDK.loadFloor(buildingId: b.id, floorId: f.id)
                 infra = loaded
                 let anchorDict = Dictionary(uniqueKeysWithValues:
                     loaded.anchors.map { ($0.address, SIMD3<Double>($0.x, $0.y, $0.z)) })
@@ -372,7 +429,7 @@ struct VerifyView: View {
         zoneWatchTask?.cancel(); zoneWatchTask = nil
         zonesRefreshing = true
         Task { @MainActor in
-            let zones = await OneS1ghtSDK.shared.refreshZones()
+            let zones = await OneS1ghtSDK.refreshZones()
             try? await Task.sleep(nanoseconds: 700_000_000)   // 조회가 0.1초라 최소 스핀 시간 확보
             withAnimation { self.infra?.zones = zones }
             zonesRefreshing = false
@@ -389,7 +446,7 @@ struct VerifyView: View {
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 1_000_000_000)   // 1초
                 guard !Task.isCancelled, infra?.floorId == floorId else { return }
-                let zones = await OneS1ghtSDK.shared.refreshZones()
+                let zones = await OneS1ghtSDK.refreshZones()
                 if !zones.isEmpty {
                     withAnimation { infra?.zones = zones }    // 생기면 그냥 바로 보여줌
                     zoneWatchTask = nil
@@ -399,26 +456,27 @@ struct VerifyView: View {
         }
     }
 
-    /// 영역 진입/이탈 — 진입하면 서버 다운링크 큐를 1초마다 폴링, 이탈하면 중지.
-    /// 큐에 이벤트가 있으면(서버가 push) payload에 맞춰 인앱 메시지를 띄운다.
+    /// 영역 진입/이탈 표시 — 지도 로컬 감지는 화면 toast까지만.
+    /// 쿠폰 큐 폴링은 PRM IN 판정(onZoneEvent .enter → startEventPolling)이 트리거한다.
     private func handleAreaChange(_ area: Zone?) {
-        pollTask?.cancel(); pollTask = nil
-        guard let area, let infra else {                       // 이탈
+        guard let area else {                                  // 이탈
             if enteredArea != nil { showToast(Localized.text("log.areaExit")) }
             enteredArea = nil
             return
         }
         enteredArea = area.name                                // 진입 = Enter
-        guard !couponReceived else {                           // 이미 쿠폰 받음 → 폴링 안 함
-            showToast(Localized.format("log.areaEnterDone", area.name))
-            return
-        }
         showToast(Localized.format("log.areaEnter", area.name))
+    }
+
+    /// PRM IN 판정 → 다운링크 큐 1초 폴링 시작 (쿠폰 등 인앱 이벤트). PRM OUT 이면 중지.
+    private func startEventPolling(zoneId: String) {
+        pollTask?.cancel(); pollTask = nil
+        guard let infra, !couponReceived else { return }       // 이미 받았으면 세션 종료까지 안 띄움
         pollTask = Task { @MainActor in
             while !Task.isCancelled {
                 if let payload = await EventQueueClient.pop(buildingId: infra.buildingId,
                                                             floorId: infra.floorId,
-                                                            zoneId: area.id) {
+                                                            zoneId: zoneId) {
                     presentServerEvent(payload)                // 큐에 이벤트 있음 → 인앱 메시지
                 }
                 try? await Task.sleep(nanoseconds: 1_000_000_000)   // 1초
@@ -451,7 +509,7 @@ struct VerifyView: View {
         couponReceived = false   // 새 세션 → 쿠폰 다시 받을 수 있게
         Task {
             do {
-                try await OneS1ghtSDK.shared.start(consent: true,    // 검증 앱은 동의 전제
+                try await OneS1ghtSDK.start(consent: true,    // 검증 앱은 동의 전제
                                                    provider: provider)
                 startReceptionWatchdog()   // 앵커 수신 감시 → 안 잡히면 자동 종료
             } catch {

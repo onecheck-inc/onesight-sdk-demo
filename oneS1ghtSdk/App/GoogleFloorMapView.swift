@@ -108,6 +108,8 @@ struct GoogleFloorMapView: UIViewRepresentable {
         private weak var mapView: GMSMapView?
         private var planOverlay: GMSGroundOverlay?
         private var areaPolygons: [String: GMSPolygon] = [:]
+        private var bufferLines: [String: GMSPolyline] = [:]   // 진입거리(in_dist) 판정 경계 — 가는 점선
+        private var areaSignature = ""                         // 존 id+폴리곤+진입거리 — 값만 바뀌어도 다시 그리게
         private var meMarker: GMSMarker?
         private var currentAreaId: String?
 
@@ -147,19 +149,26 @@ struct GoogleFloorMapView: UIViewRepresentable {
             if newInfra.floorId != infra.floorId {
                 planOverlay?.map = nil; planOverlay = nil
                 areaPolygons.values.forEach { $0.map = nil }; areaPolygons.removeAll()
+                bufferLines.values.forEach { $0.map = nil }; bufferLines.removeAll()
+                areaSignature = ""
                 meMarker?.map = nil; meMarker = nil
                 currentAreaId = nil
                 didFit = false
                 infra = newInfra
+                areaSignature = Self.signature(of: newInfra.zones)
                 install(on: mapView, infra: newInfra, rotation: rotation)
                 return
             }
 
             infra = newInfra   // 존 판정이 항상 최신 목록을 보게
-            let newIds = Set(newInfra.zones.map(\.id))
-            if newIds != Set(areaPolygons.keys) {
+            // ID 만 비교하면 "같은 존의 진입거리/폴리곤 수정"이 반영되지 않는다 → 값까지 서명에 포함
+            let sig = Self.signature(of: newInfra.zones)
+            if sig != areaSignature {
+                areaSignature = sig
                 areaPolygons.values.forEach { $0.map = nil }
                 areaPolygons.removeAll()
+                bufferLines.values.forEach { $0.map = nil }
+                bufferLines.removeAll()
                 addAreas(newInfra.zones, to: mapView)
             }
         }
@@ -269,7 +278,77 @@ struct GoogleFloorMapView: UIViewRepresentable {
                 apply(style: polygon, entered: false)
                 polygon.map = showAreas ? mapView : nil
                 areaPolygons[area.id] = polygon
+
+                // 진입거리(in_dist) 판정 경계 — PRM 이 실제로 IN 을 시작하는 부풀린 폴리곤.
+                // 그린 존(실선)과 구분되게 가는 점선. 표시용 마이터 근사(모서리 둥글림 생략).
+                if area.inDist > 0 {
+                    let bpts = Self.buffered(area.polygon, by: area.inDist)
+                    let bpath = GMSMutablePath()
+                    var bok = true
+                    for p in bpts {
+                        guard let c = world(x: p.x, y: p.y) else { bok = false; break }
+                        bpath.add(c)
+                    }
+                    if bok, bpath.count() >= 3 {
+                        if let first = bpts.first, let c = world(x: first.x, y: first.y) {
+                            bpath.add(c)   // 폐합
+                        }
+                        let line = GMSPolyline(path: bpath)
+                        line.strokeWidth = 1
+                        line.zIndex = 2
+                        let dash = [GMSStrokeStyle.solidColor(UIColor.systemGray.withAlphaComponent(0.8)),
+                                    GMSStrokeStyle.solidColor(.clear)]
+                        line.spans = GMSStyleSpans(bpath, dash, [0.25, 0.25], GMSLengthKind.rhumb)
+                        line.map = showAreas ? mapView : nil
+                        bufferLines[area.id] = line
+                    }
+                }
             }
+        }
+
+        /// 존 목록의 표시 서명 — id·진입거리·폴리곤 좌표가 하나라도 바뀌면 달라진다
+        static func signature(of zones: [Zone]) -> String {
+            zones.map { z in
+                let pts = z.polygon.map { String(format: "%.2f,%.2f", $0.x, $0.y) }.joined(separator: ";")
+                return "\(z.id)|\(String(format: "%.2f", z.inDist))|\(pts)"
+            }.joined(separator: "//")
+        }
+
+        /// 폴리곤을 바깥으로 d(m) 부풀린 꼭짓점 — 각 에지를 평행이동해 교점을 취하는 마이터 근사.
+        /// (PRM 의 buffer 는 모서리가 둥글지만, 표시용 가이드라 직각 근사로 충분)
+        static func buffered(_ pts: [Position], by d: Double) -> [Position] {
+            let n = pts.count
+            guard n >= 3, d > 0 else { return pts }
+            var area2 = 0.0
+            for i in 0..<n {
+                let a = pts[i], b = pts[(i + 1) % n]
+                area2 += a.x * b.y - b.x * a.y
+            }
+            let sign = area2 >= 0 ? 1.0 : -1.0     // CCW/CW 무관하게 바깥 노멀
+            func normal(_ a: Position, _ b: Position) -> (Double, Double) {
+                let dx = b.x - a.x, dy = b.y - a.y
+                let len = max((dx * dx + dy * dy).squareRoot(), 1e-9)
+                return (sign * dy / len, -sign * dx / len)
+            }
+            var out: [Position] = []
+            for i in 0..<n {
+                let p0 = pts[(i + n - 1) % n], p1 = pts[i], p2 = pts[(i + 1) % n]
+                let n1 = normal(p0, p1), n2 = normal(p1, p2)
+                let a1 = (x: p0.x + n1.0 * d, y: p0.y + n1.1 * d)
+                let b1 = (x: p1.x + n1.0 * d, y: p1.y + n1.1 * d)
+                let a2 = (x: p1.x + n2.0 * d, y: p1.y + n2.1 * d)
+                let b2 = (x: p2.x + n2.0 * d, y: p2.y + n2.1 * d)
+                let d1 = (x: b1.x - a1.x, y: b1.y - a1.y)
+                let d2 = (x: b2.x - a2.x, y: b2.y - a2.y)
+                let denom = d1.x * d2.y - d1.y * d2.x
+                if abs(denom) < 1e-9 {
+                    out.append(Position(x: b1.x, y: b1.y))            // 평행 에지 — 단순 평행이동
+                } else {
+                    let t = ((a2.x - a1.x) * d2.y - (a2.y - a1.y) * d2.x) / denom
+                    out.append(Position(x: a1.x + t * d1.x, y: a1.y + t * d1.y))
+                }
+            }
+            return out
         }
 
         /// 내 위치 아이콘 — 기본 핀 대신 빨간 점 (흰 테두리로 도면 선 위에서도 구분)
@@ -301,6 +380,7 @@ struct GoogleFloorMapView: UIViewRepresentable {
                 polygon.map = showAreas ? mapView : nil
                 apply(style: polygon, entered: id == currentAreaId)
             }
+            for line in bufferLines.values { line.map = showAreas ? mapView : nil }
 
             guard let p = position,
                   let coord = world(x: p.x, y: p.y) else { return }
