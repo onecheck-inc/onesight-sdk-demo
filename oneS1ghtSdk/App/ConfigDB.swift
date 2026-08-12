@@ -43,12 +43,7 @@ enum ConfigDB {
     static var partnerKey: String { table["partner_key"] ?? "" }
     static var googleMapKey: String { table["google_map_key"] ?? "" }
 
-    /// 도면 원점(로컬 0,0)의 위경도 폴백 — GeoSpace plan.gps 가 null 인 동안만 쓴다.
-    /// 정렬이 되면 API 값이 우선이므로 이 표는 참조되지 않는다.
-    static func originFallback(floorId: String) -> CLLocationCoordinate2D? {
-        guard let raw = table["origin_\(floorId)"] else { return nil }
-        let parts = raw.split(separator: ",").compactMap { Double($0.trimmingCharacters(in: .whitespaces)) }
-        guard parts.count == 2 else { return nil }
-        return CLLocationCoordinate2D(latitude: parts[0], longitude: parts[1])
-    }
+    // 층별 원점(origin_*) 표는 2026-08-12 제거.
+    // 값이 전부 근사치라 도면이 어차피 엉뚱한 데 얹혔고, 타일이 꺼져 있어 화면은 (0,0)과 동일했다.
+    // 지금은 LocationTransformer.defaultOrigin 하나로 통일 — 서버가 plan.gps 를 주면 그걸 쓴다.
 }

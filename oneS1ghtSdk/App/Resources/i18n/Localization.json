@@ -1,5 +1,5 @@
 {
-  "floor.jpMeetingRoom": {"ko": "대회의실", "ja": "大会議室", "en": "Conference Room"},
+  "floor.meetingRoom": {"ko": "대회의실", "ja": "大会議室", "en": "Conference Room"},
   "picker.building": {"ko": "빌딩 선택", "ja": "建物を選択", "en": "Select building"},
   "picker.floor": {"ko": "층 선택", "ja": "階を選択", "en": "Select floor"},
   "label.building": {"ko": "빌딩", "ja": "建物", "en": "Building"},

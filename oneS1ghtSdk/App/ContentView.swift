@@ -41,6 +41,10 @@ struct VerifyView: View {
     @State private var buildings: [SpaceBuilding] = []
     @State private var selectedBuilding: SpaceBuilding?
     @State private var selectedFloor: SpaceFloor?
+    // 마지막 선택 기억 — 다음 실행에 같은 현장으로 바로 연다 (검증 중 매번 고르는 수고 제거).
+    // 서버에서 그 빌딩·층이 사라졌으면 무시하고 기본 선택으로 떨어진다.
+    @AppStorage("lastBuildingId") private var lastBuildingId = ""
+    @AppStorage("lastFloorId") private var lastFloorId = ""
 
     /// 트래킹 시작 가능 여부 — 기기 지원 + 도면 로드됨 + 앵커 클러스터 배치완료(auto_done).
     /// (배치돼도 전원 이슈 등으로 신호가 없을 수 있어, 시작 후 watchdog가 최종 확인)
@@ -53,10 +57,13 @@ struct VerifyView: View {
     @State private var enteredArea: String?          // 현재 진입한 zone 이름 (지도가 알려줌)
     @State private var couponTitle = ""              // payload.title
     @State private var couponContent = ""            // payload.content
-    @State private var pollTask: Task<Void, Never>?  // 존 진입 중 1초 큐 폴링
+    @State private var pollTask: Task<Void, Never>?  // 진행 중인 존 이벤트 조회 (재진입 시 교체)
     @State private var zoneWatchTask: Task<Void, Never>?  // 존 0개일 때 1초 존 등록 감시
     @State private var zonesRefreshing = false            // 존 새로고침 중 (버튼 스피너)
-    @State private var couponReceived = false        // 쿠폰 1회 수령 → 이번 세션 종료
+    /// 측위 세션 ID — 시작할 때 발급, 종료하면 소멸. 존 이벤트 조회에 실어 보낸다.
+    /// 서버가 이 값으로 "이 세션에 이미 보냈나"를 판정하므로, 앱 로컬 1회 플래그는 두지 않는다
+    /// (로컬로 막으면 콘솔 [테스트]로 수신기록을 초기화해도 앱이 스스로 막아버린다).
+    @State private var eventSessionId: String?
 
     /// [데모] toast 배너 off — 메시지는 하단 상태바 로그로만 남긴다.
     private func showToast(_ text: String) {
@@ -97,17 +104,18 @@ struct VerifyView: View {
             // 존은 있으면 항상 표시 (on/off 토글 없음)
             // 원점 위경도가 있으면 구글맵 위에 도면을 얹고, 없으면 기존 캔버스로 그린다.
             Group {
-                if let infra, let origin = ConfigDB.originFallback(floorId: infra.floorId) {
+                if let infra {
                     GoogleFloorMapView(provider: provider, infra: infra,
-                                       origin: origin,
-                                       mapRotation: mapRotation(for: selectedFloor?.id),
+                                       origin: LocationTransformer.defaultOrigin,
+                                       mapRotation: mapRotation(for: infra),
                                        showAreas: true,
                                        onAreaChange: { area in handleAreaChange(area) })
                 } else {
-                    FloorMapView(provider: provider, infra: infra,
+                    // 도면 로딩 전 — 캔버스 뷰가 빈 상태를 그린다
+                    FloorMapView(provider: provider, infra: nil,
                                  showAreas: true,
                                  onAreaChange: { area in handleAreaChange(area) },
-                                 mapRotation: mapRotation(for: selectedFloor?.id))
+                                 mapRotation: mapRotation(for: nil))
                 }
             }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -203,10 +211,9 @@ struct VerifyView: View {
             // 존에 연결된 시책이 쿠폰이면 팝업, 그 외(사이니지 등)는 toast.
             OneS1ghtSDK.onTriggers = { zoneId, triggers in
                 for t in triggers {
-                    if t.type == "coupon", !couponReceived {
+                    if t.type == "coupon" {
                         couponTitle = t.payload?["title"] ?? "쿠폰"
                         couponContent = t.payload?["rule"] ?? ""
-                        couponReceived = true                 // 세션당 1회
                         showToast("🎁 \(couponTitle)")
                         withAnimation { showCoupon = true }
                     } else {
@@ -221,14 +228,14 @@ struct VerifyView: View {
             // 판정 증적 — 화면 로그는 200줄 링버퍼 휘발이라, 전 라인을 파일에 영속
             provider.onLog = { line in JudgmentLog.append(line) }
             // 판정 팝업 — 엔진 이벤트를 시각과 함께 화면에 (걷기 검증용)
-            // ★ 쿠폰은 PRM 판정 기준: IN → 큐 폴링 시작 · OUT → 중지
+            // ★ 쿠폰은 PRM 판정 기준: IN 에서 이벤트 1회 조회 · OUT 이면 진행 중인 조회 취소
             provider.onZoneEvent = { ev in
                 let df = DateFormatter()
                 df.locale = Locale(identifier: "en_US_POSIX")
                 df.dateFormat = "HH:mm:ss"
                 showJudgeBanner("\(ev.label) · \(df.string(from: Date()))")
                 switch ev {
-                case .enter(let zone, _): startEventPolling(zoneId: zone.id)
+                case .enter(let zone, _): fetchZoneEvent(zoneId: zone.id)
                 case .exit:               pollTask?.cancel(); pollTask = nil
                 default:                  break
                 }
@@ -240,25 +247,17 @@ struct VerifyView: View {
         }
     }
 
-    /// 층 표시 이름 치환 — GeoSpace에 층 이름 수정 API/UI가 없어(07-27 확인) 앱에서 표시만 교체.
-    /// 서버 원본 이름("304로")은 그대로 두고 화면에만 적용. 서버에서 수정 가능해지면 제거.
+    /// 층 표시 이름 — 서버에 잘못 등록된 이름을 화면에서만 교체한다.
+    /// GeoSpace 에 층 이름 수정 API/UI 가 없어(07-27 확인) 앱이 떠안고 있다. 서버에서 고치면 제거.
     private func floorDisplayName(_ f: SpaceFloor) -> String {
-        switch f.id {
-        case "7aeb5ded-8dd2-4ed7-951f-4d18317910ce":
-            return Localized.text("floor.jpMeetingRoom")   // 서버명: "304로"
-        default:
-            return f.name
-        }
+        f.name == "304로" ? Localized.text("floor.meetingRoom") : f.name
     }
 
-    /// 층별 도면 회전각 (도면 원본 방향이 층마다 달라 지정).
-    private func mapRotation(for floorId: String?) -> Double {
-        switch floorId {
-        case "7aeb5ded-8dd2-4ed7-951f-4d18317910ce": return 0     // 아카시아 304로
-        case "15612d2d-c100-4ee3-80c7-fc813578bcb9": return 270   // 607호
-        default:                                      return 270
-        }
-    }
+    /// 도면 회전각 — 지금은 회전 없음(위쪽 = 도면 원본 위쪽).
+    /// 가로 도면을 270°로 돌리면 세로 화면을 꽉 채우지만 방향 감각이 바뀌어, 확인 전까지 보류한다.
+    /// 지도는 회전 제스처가 살아 있어 손으로 돌릴 수 있다.
+    /// (서버 plan.rotationDeg 는 층 정렬 전이라 전부 0 — 채워지면 그 값을 쓴다)
+    private func mapRotation(for infra: FloorInfra?) -> Double { 0 }
 
     /// 캡션 라벨 + 픽커 필드 묶음
     private func labeledPicker<Content: View>(_ caption: String,
@@ -329,7 +328,8 @@ struct VerifyView: View {
     /// 트래킹 버튼 — 권한 없으면 팝업, 있으면 SDK start/stop
     private func handleTrackingButton() {
         if provider.isRunning {
-            pollTask?.cancel(); pollTask = nil   // 큐 폴링 중지
+            pollTask?.cancel(); pollTask = nil   // 진행 중인 이벤트 조회 중단
+            eventSessionId = nil                 // 측위 종료 = 세션 소멸 (다시 시작하면 새 ID)
             enteredArea = nil
             provider.stop()                       // 즉시 isRunning=false → 상태 바로 전환
             Task { await OneS1ghtSDK.stop() }   // 코어 flush·타이머 정리
@@ -368,25 +368,27 @@ struct VerifyView: View {
                 let list = try await OneS1ghtSDK.buildings()
                 buildings = list
                 provider.note(Localized.format("log.buildingsLoaded", list.count))
-                // 기본 선택: 금정역 skv1 — 구글맵 원점 좌표가 있는 유일한 층이라 지도 검증이 여기서만 된다
-                let defaultBuildingId = "0fe8f405-a710-44ee-96a2-f927c44b9cde"
-                let defaultBuilding = list.first { $0.id == defaultBuildingId } ?? list.first
-                if let defaultBuilding { selectBuilding(defaultBuilding) }
+                // 지난번 선택을 복원 — 없거나 서버에서 사라졌으면 첫 빌딩
+                let target = list.first { $0.id == lastBuildingId } ?? list.first
+                if let target { selectBuilding(target) }
             } catch {
                 provider.note(Localized.text("log.buildingsFail"))
             }
         }
     }
 
-    /// 빌딩 선택 → 그 빌딩의 첫 층 자동 선택 후 로딩.
+    /// 빌딩 선택 → 지난번 층(있으면) 아니면 첫 층 자동 선택 후 로딩.
     private func selectBuilding(_ b: SpaceBuilding) {
         selectedBuilding = b
-        if let f = b.floors.first { selectFloor(f) } else { selectedFloor = nil; infra = nil }
+        lastBuildingId = b.id
+        let target = b.floors.first { $0.id == lastFloorId } ?? b.floors.first
+        if let target { selectFloor(target) } else { selectedFloor = nil; infra = nil }
     }
 
     /// 층 선택 → 그 building/floor 의 도면·앵커·존 로딩.
     private func selectFloor(_ f: SpaceFloor) {
         selectedFloor = f
+        lastFloorId = f.id
         guard let b = selectedBuilding else { return }
         // 층 변경 → 측위 즉시 중단. provider.stop()을 동기로 먼저 호출해 isRunning을 바로 꺼서
         // 상태가 "측위 중"에 안 걸리게 하고, 코어 정리·flush는 async로 뒤따른다.
@@ -396,7 +398,7 @@ struct VerifyView: View {
         }
         infra = nil                              // 로딩 표시(도면 로딩 중…)
         floorLoading = true                      // 상태바 "도면 불러오는 중"
-        enteredArea = nil; couponReceived = false
+        enteredArea = nil
         pollTask?.cancel(); pollTask = nil
         zoneWatchTask?.cancel(); zoneWatchTask = nil
         Task {
@@ -457,7 +459,7 @@ struct VerifyView: View {
     }
 
     /// 영역 진입/이탈 표시 — 지도 로컬 감지는 화면 toast까지만.
-    /// 쿠폰 큐 폴링은 PRM IN 판정(onZoneEvent .enter → startEventPolling)이 트리거한다.
+    /// 쿠폰 조회는 PRM IN 판정(onZoneEvent .enter → fetchZoneEvent)이 트리거한다.
     private func handleAreaChange(_ area: Zone?) {
         guard let area else {                                  // 이탈
             if enteredArea != nil { showToast(Localized.text("log.areaExit")) }
@@ -468,19 +470,18 @@ struct VerifyView: View {
         showToast(Localized.format("log.areaEnter", area.name))
     }
 
-    /// PRM IN 판정 → 다운링크 큐 1초 폴링 시작 (쿠폰 등 인앱 이벤트). PRM OUT 이면 중지.
-    private func startEventPolling(zoneId: String) {
-        pollTask?.cancel(); pollTask = nil
-        guard let infra, !couponReceived else { return }       // 이미 받았으면 세션 종료까지 안 띄움
+    /// PRM IN 판정 → 존 이벤트 1회 조회 (쿠폰 등 인앱 이벤트).
+    /// 서버가 호출 시점에 결정적인 답을 주므로 폴링하지 않는다. 이탈 후 재진입 시 다시 불러도
+    /// 같은 session_id 면 서버가 빈 배열로 답한다.
+    private func fetchZoneEvent(zoneId: String) {
+        pollTask?.cancel()
+        guard let infra, let sid = eventSessionId else { return }
         pollTask = Task { @MainActor in
-            while !Task.isCancelled {
-                if let payload = await EventQueueClient.pop(buildingId: infra.buildingId,
-                                                            floorId: infra.floorId,
-                                                            zoneId: zoneId) {
-                    presentServerEvent(payload)                // 큐에 이벤트 있음 → 인앱 메시지
-                }
-                try? await Task.sleep(nanoseconds: 1_000_000_000)   // 1초
-            }
+            let events = await EventQueueClient.fetch(buildingId: infra.buildingId,
+                                                      floorId: infra.floorId,
+                                                      zoneId: zoneId, sessionId: sid)
+            guard !Task.isCancelled else { return }
+            for payload in events { presentServerEvent(payload) }
         }
     }
 
@@ -495,8 +496,6 @@ struct VerifyView: View {
         case "coupon":
             couponTitle = title
             couponContent = content
-            couponReceived = true                 // 쿠폰 1회 → 종료
-            pollTask?.cancel(); pollTask = nil     // 더는 폴링 안 함
             showToast("🎁 \(title)")
             withAnimation { showCoupon = true }
         default:
@@ -506,7 +505,9 @@ struct VerifyView: View {
 
     /// SDK 시작 (매장 진입) — initialize가 미리 끝나 있어 즉시 가동
     private func startSDK() {
-        couponReceived = false   // 새 세션 → 쿠폰 다시 받을 수 있게
+        let sid = Self.makeSessionId()
+        eventSessionId = sid                     // 이번 측위 동안 유지 — 종료 시 소멸
+        provider.note("🆔 측위 세션 \(sid)")
         Task {
             do {
                 try await OneS1ghtSDK.start(consent: true,    // 검증 앱은 동의 전제
@@ -517,6 +518,12 @@ struct VerifyView: View {
                 provider.note("⚠️ 측위 시작 실패: \(error)")
             }
         }
+    }
+
+    /// 측위 세션 ID — 영숫자 10자리. 62^10 ≈ 8×10^17 이라 충돌은 사실상 없다.
+    private static func makeSessionId() -> String {
+        let alphabet = Array("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789")
+        return String((0..<10).map { _ in alphabet.randomElement()! })
     }
 
     /// 시작 후 앵커 수신 감시 — 7초 내 유효앵커 부족(측위 불가)이면 경고 + 자동 종료.

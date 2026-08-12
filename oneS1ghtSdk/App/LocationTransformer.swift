@@ -26,6 +26,15 @@ enum LocationTransformer {
     /// 미주입이면 변환 함수가 nil을 돌려준다 (엉뚱한 위치에 그리는 것보다 안 그리는 게 낫다).
     static var origin: CLLocationCoordinate2D?
 
+    /// 기본 원점 — 도면 정렬(GeoSpace plan.gps)이 되기 전까지 모든 층이 이걸 쓴다.
+    ///
+    /// 실제 위치와 달라도 되는 이유: 지도 타일이 꺼져 있어(mapType .none · 흰 배경)
+    /// 도면이 지구상 어디에 얹히든 화면이 같다. 구글맵은 좌표가 "있기만" 하면 그린다.
+    /// 적도를 쓰는 이유: cos(lat)=1 이라 경도 왜곡이 0 → 로컬 미터가 그대로 얹힌다.
+    ///
+    /// 서버가 plan.gps 를 주기 시작하면 층마다 그 값을 origin 에 넣으면 된다 (여긴 그대로 기본값).
+    static let defaultOrigin = CLLocationCoordinate2D(latitude: 0, longitude: 0)
+
     /// 로컬 미터 → 위경도. 원점에서 동쪽으로 x, 북쪽으로 y 이동한 지점.
     static func toWorld(x: Double, y: Double) -> CLLocationCoordinate2D? {
         guard let origin else { return nil }
