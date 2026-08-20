@@ -11,7 +11,7 @@
 //
 
 import Foundation
-import OneS1ghtSDK
+import OneS1ght
 
 enum EventQueueClient {
 
