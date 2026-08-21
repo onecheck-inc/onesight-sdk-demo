@@ -2,7 +2,7 @@
 //  ContentView.swift
 //  oneS1ghtSdk
 //
-//  검증 앱 = "고객사 앱 시늉". OneS1ghtSDK 패키지를 소비한다:
+//  검증 앱 = "고객사 앱 시늉". OneS1ght 패키지를 SPM 으로 소비한다(upToNextMajor 0.1.0 → 현재 0.1.3):
 //    · 측위 엔진(UwbPositioningProvider·패키지 내장)을 provider로 주입해 start
 //    · zone 판정(PRM) → onZoneEvent 판정 배너 (로컬 훅)
 //    · PRM IN → 서버 /events/zone → onTriggers — 존에 연결된 시책이 쿠폰이면 팝업
@@ -10,7 +10,7 @@
 
 import SwiftUI
 import UIKit
-import OneS1ghtSDK
+import OneS1ght
 
 struct ContentView: View {
     var body: some View {
@@ -38,13 +38,17 @@ struct VerifyView: View {
     @State private var floorLoading = false   // 도면(GeoSpace) 로딩 중 — 층 전환 포함
 
     // 빌딩/층 선택
-    @State private var buildings: [SpaceBuilding] = []
-    @State private var selectedBuilding: SpaceBuilding?
-    @State private var selectedFloor: SpaceFloor?
-    // 마지막 선택 기억 — 다음 실행에 같은 현장으로 바로 연다 (검증 중 매번 고르는 수고 제거).
-    // 서버에서 그 빌딩·층이 사라졌으면 무시하고 기본 선택으로 떨어진다.
-    @AppStorage("lastBuildingId") private var lastBuildingId = ""
-    @AppStorage("lastFloorId") private var lastFloorId = ""
+    @State private var buildings: [Building] = []
+    @State private var selectedBuilding: Building?
+    /// v0.1.0 부터 Building 이 층을 품지 않는다(floorCount 만) — 층은 따로 받아 여기 둔다.
+    @State private var floors: [Floor] = []
+    @State private var selectedFloor: Floor?
+    // 마지막 선택 복원은 두지 않는다. 편의로 넣었다가, 앱을 켜자마자 아무것도 고르지 않았는데
+    // 층 목록·도면 요청이 나가고 실패 로그만 쌓이는 상태가 됐다 — 화면과 로그가 어긋난다.
+    // 검증 앱에서는 "무엇을 눌렀을 때 무엇이 일어나는가" 가 눈에 보이는 편이 낫다.
+    /// 서버가 발급한 프로필 ID — 앱이 보관해 재사용한다(기기마다 하나).
+    /// 매번 새로 만들면 같은 기기의 방문이 사람 수만큼 갈라져 리포트가 어긋난다.
+    @AppStorage("profileId") private var storedProfileId = ""
 
     /// 트래킹 시작 가능 여부 — 기기 지원 + 도면 로드됨 + 앵커 클러스터 배치완료(auto_done).
     /// (배치돼도 전원 이슈 등으로 신호가 없을 수 있어, 시작 후 watchdog가 최종 확인)
@@ -94,7 +98,7 @@ struct VerifyView: View {
                 }
                 labeledPicker(Localized.text("label.floor")) {
                     Menu {
-                        ForEach(selectedBuilding?.floors ?? []) { f in Button(floorDisplayName(f)) { selectFloor(f) } }
+                        ForEach(floors) { f in Button(floorDisplayName(f)) { selectFloor(f) } }
                     } label: { pickerField("🗺", selectedFloor.map(floorDisplayName) ?? Localized.text("picker.floor")) }
                         .disabled(selectedBuilding == nil)
                 }
@@ -207,22 +211,9 @@ struct VerifyView: View {
         }
         .animation(.snappy, value: judgeBanner)
         .onAppear {
-            // 서버 triggers(개인화 액션) — PRM IN 전송 → /events/zone 응답으로 도착.
-            // 존에 연결된 시책이 쿠폰이면 팝업, 그 외(사이니지 등)는 toast.
-            OneS1ghtSDK.onTriggers = { zoneId, triggers in
-                for t in triggers {
-                    if t.type == "coupon" {
-                        couponTitle = t.payload?["title"] ?? "쿠폰"
-                        couponContent = t.payload?["rule"] ?? ""
-                        showToast("🎁 \(couponTitle)")
-                        withAnimation { showCoupon = true }
-                    } else {
-                        showToast(Localized.format("log.serverAction", t.type))
-                    }
-                }
-            }
-            // SDK 내부 활동(verify·flush·zone 전송 결과)을 같은 로그창에 합류
-            OneS1ghtSDK.onDebugLog = { line in
+            // SDK 내부 활동(verify·flush·zone 전송 결과)을 같은 로그창에 합류.
+            // ⚠️ initialize 보다 먼저 걸어야 초기화 단계 로그를 놓치지 않는다.
+            OneS1ght.onDebugLog = { line in
                 provider.note("🌐 \(line)")
             }
             // 판정 증적 — 화면 로그는 200줄 링버퍼 휘발이라, 전 라인을 파일에 영속
@@ -241,15 +232,16 @@ struct VerifyView: View {
                 }
             }
             // ① 앱 시작 시 초기화 — 키 검증 + 설정 프리페치 ("세션 가능?" 미리 판정)
+            //    ② 세션 콜백 등록과 ③ 빌딩 목록 로드는 초기화가 끝난 뒤에 이어진다.
+            //    ⚠️ v0.1.0 부터 초기화 전 호출은 notInitialized(E1001) 로 실패한다 —
+            //       옛 API 처럼 나란히 부르면 목록이 비어 보인다.
             initializeSDK()
-            // ② 빌딩/층 목록 로드 → 첫 빌딩·층 자동 선택 → 도면 로딩
-            loadBuildingList()
         }
     }
 
     /// 층 표시 이름 — 서버에 잘못 등록된 이름을 화면에서만 교체한다.
     /// GeoSpace 에 층 이름 수정 API/UI 가 없어(07-27 확인) 앱이 떠안고 있다. 서버에서 고치면 제거.
-    private func floorDisplayName(_ f: SpaceFloor) -> String {
+    private func floorDisplayName(_ f: Floor) -> String {
         f.name == "304로" ? Localized.text("floor.meetingRoom") : f.name
     }
 
@@ -332,7 +324,7 @@ struct VerifyView: View {
             eventSessionId = nil                 // 측위 종료 = 세션 소멸 (다시 시작하면 새 ID)
             enteredArea = nil
             provider.stop()                       // 즉시 isRunning=false → 상태 바로 전환
-            Task { await OneS1ghtSDK.stop() }   // 코어 flush·타이머 정리
+            endSession()                          // 코어 flush·타이머 정리
             return
         }
         switch permission.locationStatus {
@@ -345,15 +337,34 @@ struct VerifyView: View {
         }
     }
 
+    /// 측위 세션 종료 — 잔여 좌표 flush + 타이머 정리.
+    /// floorSession() 은 초기화 전이면 throw 하므로 조용히 넘어간다(끌 세션이 애초에 없다).
+    private func endSession() {
+        Task { @MainActor in
+            if let session = try? OneS1ght.floorSession() { await session.end() }
+        }
+    }
+
     /// SDK 초기화 (앱 시작 시 1회) — 키 검증 + 설정 프리페치. 여기서 "세션 가능"이 판정됨.
     private func initializeSDK() {
         connState = .connecting
         Task {
             do {
-                try await OneS1ghtSDK.initialize(
+                try await OneS1ght.initialize(
                     sdkKey: ConfigDB.sdkKey,
-                    geospaceKey: ConfigDB.geospaceKey.isEmpty ? nil : ConfigDB.geospaceKey)
+                    geoSdkKey: ConfigDB.geospaceKey.isEmpty ? nil : ConfigDB.geospaceKey)
+
+                // 프로필 연결 — 없으면 좌표·존 이벤트가 어디에도 귀속되지 않는다(E1004).
+                // 검증 앱이라 기기에 하나 만들어 두고 계속 재사용한다.
+                if storedProfileId.isEmpty {
+                    storedProfileId = try await OneS1ght.createProfile([:])
+                    provider.note("🆕 프로필 발급 \(storedProfileId)")
+                }
+                OneS1ght.identify(profileId: storedProfileId)
+
+                bindSessionCallbacks()
                 connState = .ready
+                loadBuildingList()          // 초기화가 끝나야 조회가 통한다
             } catch {
                 connState = .failed
                 provider.note("⚠️ 초기화 실패: \(error)")   // 실 연결 오류만 여기로
@@ -361,40 +372,73 @@ struct VerifyView: View {
         }
     }
 
-    /// 빌딩/층 목록 로드 → 첫 빌딩·층 자동 선택.
+    /// 세션 콜백 — 서버 triggers(개인화 액션)는 PRM IN 전송 → /events/zone 응답으로 도착.
+    /// 존에 연결된 시책이 쿠폰이면 팝업, 그 외(사이니지 등)는 toast.
+    /// ⚠️ floorSession() 은 초기화 후에만 얻을 수 있다.
+    @MainActor
+    private func bindSessionCallbacks() {
+        guard let session = try? OneS1ght.floorSession() else { return }
+        session.onTriggers = { _, triggers in
+            for t in triggers {
+                if t.type == "coupon" {
+                    couponTitle = t.payload?["title"] ?? "쿠폰"
+                    couponContent = t.payload?["rule"] ?? ""
+                    showToast("🎁 \(couponTitle)")
+                    withAnimation { showCoupon = true }
+                } else {
+                    showToast(Localized.format("log.serverAction", t.type))
+                }
+            }
+        }
+    }
+
+    /// 빌딩 목록만 채운다. **여기서 층도 도면도 부르지 않는다.**
+    ///
+    /// 예전에는 목록을 받자마자 첫 건물·첫 층을 스스로 골라 도면 요청까지 냈다. 화면에는
+    /// '빌딩 선택'·'층 선택' 이 그대로 떠 있는데 뒤에서는 요청이 나가고 실패 로그만 쌓였다.
+    /// 이제는 사용자가 건물을 고를 때까지 아무 요청도 나가지 않는다.
     private func loadBuildingList() {
         Task {
             do {
-                let list = try await OneS1ghtSDK.buildings()
+                let list = try await OneS1ght.buildings()
                 buildings = list
                 provider.note(Localized.format("log.buildingsLoaded", list.count))
-                // 지난번 선택을 복원 — 없거나 서버에서 사라졌으면 첫 빌딩
-                let target = list.first { $0.id == lastBuildingId } ?? list.first
-                if let target { selectBuilding(target) }
             } catch {
                 provider.note(Localized.text("log.buildingsFail"))
             }
         }
     }
 
-    /// 빌딩 선택 → 지난번 층(있으면) 아니면 첫 층 자동 선택 후 로딩.
-    private func selectBuilding(_ b: SpaceBuilding) {
+    /// 빌딩 선택 → 그 건물의 층 목록만 조회한다. 도면은 층을 고른 뒤에 부른다.
+    /// v0.1.0 부터 Building 이 층을 품지 않아 층 조회가 한 번 더 필요하다.
+    private func selectBuilding(_ b: Building) {
         selectedBuilding = b
-        lastBuildingId = b.id
-        let target = b.floors.first { $0.id == lastFloorId } ?? b.floors.first
-        if let target { selectFloor(target) } else { selectedFloor = nil; infra = nil }
+        selectedFloor = nil
+        floors = []
+        infra = nil
+        Task {
+            do {
+                let list = try await OneS1ght.floors(b.id)
+                floors = list
+                provider.note(Localized.format("log.floorsLoaded", list.count))
+                // 층은 사용자가 고른다 — 첫 층을 임의로 골라 도면을 부르지 않는다.
+            } catch {
+                // ⚠️ 여기서 실패한 것은 **층 목록**이다. 예전에는 도면 실패와 같은 문구가 떠서
+                //    화면만 보고는 어디가 막혔는지 알 수 없었다.
+                provider.note(Localized.format("log.floorListFail", "\(error)"))
+            }
+        }
     }
 
     /// 층 선택 → 그 building/floor 의 도면·앵커·존 로딩.
-    private func selectFloor(_ f: SpaceFloor) {
+    private func selectFloor(_ f: Floor) {
         selectedFloor = f
-        lastFloorId = f.id
         guard let b = selectedBuilding else { return }
         // 층 변경 → 측위 즉시 중단. provider.stop()을 동기로 먼저 호출해 isRunning을 바로 꺼서
         // 상태가 "측위 중"에 안 걸리게 하고, 코어 정리·flush는 async로 뒤따른다.
         if provider.isRunning {
             provider.stop()                             // 즉시 isRunning=false + 빨간점 제거
-            Task { await OneS1ghtSDK.stop() }     // 코어 flush·타이머 정리
+            endSession()                                // 코어 flush·타이머 정리
         }
         infra = nil                              // 로딩 표시(도면 로딩 중…)
         floorLoading = true                      // 상태바 "도면 불러오는 중"
@@ -404,9 +448,9 @@ struct VerifyView: View {
         Task {
             defer { floorLoading = false }
             do {
-                // SDK 가 도면을 돌려주고 앵커·세션·존은 내부 엔진에 직접 주입한다.
+                // 도면·로케이터·존을 한 번에 받고 엔진 주입(setFloorMap)까지 끝낸다(SdkCompat).
                 // 데모 provider 는 UI 관찰용으로 직접 보유 중이라 config 만 수동 반영.
-                let loaded = try await OneS1ghtSDK.loadFloor(buildingId: b.id, floorId: f.id)
+                let loaded = try await FloorInfra.load(buildingId: b.id, floorId: f.id)
                 infra = loaded
                 let anchorDict = Dictionary(uniqueKeysWithValues:
                     loaded.anchors.map { ($0.address, SIMD3<Double>($0.x, $0.y, $0.z)) })
@@ -431,7 +475,7 @@ struct VerifyView: View {
         zoneWatchTask?.cancel(); zoneWatchTask = nil
         zonesRefreshing = true
         Task { @MainActor in
-            let zones = await OneS1ghtSDK.refreshZones()
+            let zones = await OneS1ght.refreshZones()
             try? await Task.sleep(nanoseconds: 700_000_000)   // 조회가 0.1초라 최소 스핀 시간 확보
             withAnimation { self.infra?.zones = zones }
             zonesRefreshing = false
@@ -448,7 +492,7 @@ struct VerifyView: View {
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 1_000_000_000)   // 1초
                 guard !Task.isCancelled, infra?.floorId == floorId else { return }
-                let zones = await OneS1ghtSDK.refreshZones()
+                let zones = await OneS1ght.refreshZones()
                 if !zones.isEmpty {
                     withAnimation { infra?.zones = zones }    // 생기면 그냥 바로 보여줌
                     zoneWatchTask = nil
@@ -510,11 +554,12 @@ struct VerifyView: View {
         provider.note("🆔 측위 세션 \(sid)")
         Task {
             do {
-                try await OneS1ghtSDK.start(consent: true,    // 검증 앱은 동의 전제
-                                                   provider: provider)
+                // 검증 앱은 UI 관찰을 위해 provider 를 직접 들고 있으므로 주입 오버로드를 쓴다.
+                // (일반 연동은 인자 없는 begin() — SDK 가 내부에서 만든다)
+                try await OneS1ght.floorSession().begin(provider: provider)
                 startReceptionWatchdog()   // 앵커 수신 감시 → 안 잡히면 자동 종료
             } catch {
-                // start 실패는 연결(초기화) 오류와 별개 → 로그로만 (상태는 연결됨 유지)
+                // 시작 실패는 연결(초기화) 오류와 별개 → 로그로만 (상태는 연결됨 유지)
                 provider.note("⚠️ 측위 시작 실패: \(error)")
             }
         }

@@ -9,7 +9,7 @@
 //
 
 import SwiftUI
-import OneS1ghtSDK
+import OneS1ght
 
 @available(iOS 27.0, *)
 struct FloorMapView: View {

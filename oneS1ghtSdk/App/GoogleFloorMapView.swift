@@ -12,7 +12,7 @@
 import SwiftUI
 import CoreLocation
 import GoogleMaps
-import OneS1ghtSDK
+import OneS1ght
 
 extension Zone {
     /// 이 영역 안에 로컬 좌표가 들어오는가 — SDK ray casting 재사용
