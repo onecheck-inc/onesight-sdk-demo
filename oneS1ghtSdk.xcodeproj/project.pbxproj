@@ -117,7 +117,7 @@
 			mainGroup = F76C97383000F1C90030AC62;
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
-				A15DDECAFE0000000000A001 /* XCRemoteSwiftPackageReference "onesight-mobile-swift" */,
+				A15DDECAFE0000000000A001 /* XCRemoteSwiftPackageReference "OneS1ght-iOS-SDK" */,
 				F71C238D301C77F8006D6155 /* XCRemoteSwiftPackageReference "ios-maps-sdk" */,
 			);
 			preferredProjectObjectVersion = 77;
@@ -372,9 +372,9 @@
 /* End XCConfigurationList section */
 
 /* Begin XCRemoteSwiftPackageReference section */
-		A15DDECAFE0000000000A001 /* XCRemoteSwiftPackageReference "onesight-mobile-swift" */ = {
+		A15DDECAFE0000000000A001 /* XCRemoteSwiftPackageReference "OneS1ght-iOS-SDK" */ = {
 			isa = XCRemoteSwiftPackageReference;
-			repositoryURL = "https://github.com/onecheck-inc/onesight-mobile-swift";
+			repositoryURL = "https://github.com/onecheck-inc/OneS1ght-iOS-SDK";
 			requirement = {
 				kind = upToNextMajorVersion;
 				minimumVersion = 0.1.0;
@@ -393,7 +393,7 @@
 /* Begin XCSwiftPackageProductDependency section */
 		A15DDECAFE0000000000A002 /* OneS1ght */ = {
 			isa = XCSwiftPackageProductDependency;
-			package = A15DDECAFE0000000000A001 /* XCRemoteSwiftPackageReference "onesight-mobile-swift" */;
+			package = A15DDECAFE0000000000A001 /* XCRemoteSwiftPackageReference "OneS1ght-iOS-SDK" */;
 			productName = OneS1ght;
 		};
 		F71C238E301C77F8006D6155 /* GoogleMaps */ = {
